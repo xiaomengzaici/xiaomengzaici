@@ -12,7 +12,7 @@ async function redirect2Pan(r) {
 
   let embyRes = {
     path: r.args[util.args.filePathKey],
-    notLocal: r.args[util.args.notLocalKey] === "1", // fuck js Boolean("false") === true, !!"0" === true
+    isStrm: r.args[util.args.isStrmKey] === "1", // fuck js Boolean("false") === true, !!"0" === true
   };
   let start = Date.now();
   let end = Date.now();
@@ -33,17 +33,14 @@ async function redirect2Pan(r) {
       r.error(embyRes.message);
       return r.return(500, embyRes.message);
     }
-  } else {
-    embyRes.path = decodeURIComponent(embyRes.path);
-    r.warn(`cached PlaybackInfo path, will skip excess fetchEmbyFilePath`);
   }
   // strm file internal text maybe encode
-  if (embyRes.notLocal) {
+  if (embyRes.isStrm) {
       embyRes.path = decodeURIComponent(embyRes.path);
   }
   r.warn(`${end - start}ms, mount emby file path: ${embyRes.path}`);
 
-  if (util.isDisableRedirect(embyRes.path, false, embyRes.notLocal)) {
+  if (util.isDisableRedirect(embyRes.path, false, embyRes.isStrm)) {
     // use original link
     return internalRedirect(r);
   }
@@ -58,9 +55,9 @@ async function redirect2Pan(r) {
   r.warn(`embyPathMapping: ${JSON.stringify(embyPathMapping)}`);
   let embyItemPath = embyRes.path;
   embyPathMapping.map(arr => {
-    if ((arr[1] == 0 && embyRes.notLocal)
-      || (arr[1] == 1 && (!embyRes.notLocal || isRemote))
-      || (arr[1] == 2 && (!embyRes.notLocal || !isRemote))) {
+    if ((arr[1] == 0 && embyRes.isStrm)
+      || (arr[1] == 1 && (!embyRes.isStrm || isRemote))
+      || (arr[1] == 2 && (!embyRes.isStrm || !isRemote))) {
         return;
     }
     embyItemPath = util.strMapping(arr[0], embyItemPath, arr[2], arr[3]);
@@ -98,7 +95,7 @@ async function redirect2Pan(r) {
   end = Date.now();
   r.warn(`${end - start}ms, fetchAlistPathApi, UA: ${ua}`);
   if (!alistRes.startsWith("error")) {
-    if (util.isDisableRedirect(alistRes, true, embyRes.notLocal)) {
+    if (util.isDisableRedirect(alistRes, true, embyRes.isStrm)) {
       // use original link
       return internalRedirect(r);
     }
@@ -134,8 +131,8 @@ async function redirect2Pan(r) {
         ua,
       );
       if (!driverRes.startsWith("error")) {
-        driverRes = driverRes.includes("http://172.17.0.1")
-          ? driverRes.replace("http://172.17.0.1", config.alistPublicAddr)
+        driverRes = driverRes.includes("http://127.0.0.1")
+          ? driverRes.replace("http://127.0.0.1", config.alistPublicAddr)
           : driverRes;
         return redirect(r, driverRes);
       }
@@ -200,12 +197,12 @@ async function transferPlaybackInfo(r) {
       source.DirectStreamUrl = util.appendUrlArg(
         source.DirectStreamUrl,
         util.args.filePathKey,
-        encodeURIComponent(source.Path)
+        source.Path
       );
       source.DirectStreamUrl = util.appendUrlArg(
         source.DirectStreamUrl,
-        util.args.notLocalKey,
-        util.checkNotLocal(source.Protocol, source.MediaStreams.length) ? "1" : "0"
+        "isStrm",
+        util.checkIsStrmByLength(source.Protocol, source.MediaStreams.length) ? "1" : "0"
       );
       // a few players not support special character
       source.DirectStreamUrl = encodeURI(source.DirectStreamUrl);
@@ -321,7 +318,7 @@ async function fetchEmbyFilePath(itemInfoUri, itemId, Etag, mediaSourceId) {
   let rvt = {
     message: "success",
     path: "",
-    notLocal: false,
+    isStrm: false,
   };
   try {
     const res = await ngx.fetch(itemInfoUri, {
@@ -342,7 +339,7 @@ async function fetchEmbyFilePath(itemInfoUri, itemId, Etag, mediaSourceId) {
         const jobItem = result.Items.find(o => o.Id == itemId);
         if (jobItem) {
           rvt.path = jobItem.MediaSource.Path;
-          rvt.notLocal = util.checkIsStrmByPath(jobItem.OutputPath);
+          rvt.isStrm = util.checkIsStrmByPath(jobItem.OutputPath);
         } else {
           rvt.message = `error: emby_api /Sync/JobItems response is null`;
           return rvt;
@@ -364,7 +361,7 @@ async function fetchEmbyFilePath(itemInfoUri, itemId, Etag, mediaSourceId) {
             mediaSource = item.MediaSources.find((m) => m.Id == mediaSourceId);
           }
           rvt.path = mediaSource.Path;
-          rvt.notLocal = util.checkIsStrmByPath(item.Path);
+          rvt.isStrm = util.checkIsStrmByPath(item.Path);
         } else {
           // "MediaType": "Photo"... not have "MediaSources" field
           rvt.path = item.Path;
@@ -492,15 +489,12 @@ async function sendMessage2EmbyDevice(deviceId, header, text, timeoutMs) {
     ngx.log(ngx.ERR, `error: sendMessage2EmbyDevice: deviceId is required`);
     return;
   }
-  embyApi.fetchEmbySessions(deviceId).then(sessionResPromise => {
-    sessionResPromise.json().then(sessionRes => {
-      if (!sessionRes || (!!sessionRes && sessionRes.length == 0)) {
-        ngx.log(ngx.ERR, `error: sendMessage2EmbyDevice: fetchEmbySessions: session not found`);
-        return;
-      }
-      embyApi.fetchEmbySessionsMessage(sessionRes[0].Id, header, text, timeoutMs);
-    });
-  });
+  const sessionRes = await embyApi.fetchEmbySessions(deviceId);
+  if (!sessionRes || (!!sessionRes && sessionRes.length == 0)) {
+    ngx.log(ngx.ERR, `error: sendMessage2EmbyDevice: fetchEmbySessions: session not found`);
+    return;
+  }
+  embyApi.fetchEmbySessionsMessage(sessionRes[0].Id, header, text, timeoutMs);
 }
 
 function redirect(r, uri) {
