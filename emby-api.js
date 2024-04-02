@@ -1,78 +1,161 @@
-// @author: chen3861229
-// @date: 2024-03-31
 import config from "./constant.js";
 
-async function fetchEmbyNotificationsAdmin(Name, Description) {
-    const body = {
-      Name: Name,
-      Description: Description
-    }
-    try {
-      ngx.fetch(`${config.embyHost}/Notifications/Admin?api_key=${config.embyApiKey}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json;charset=utf-8"
-        },
-        body: JSON.stringify(body),
-      }).then(res => {
-        if (res.ok) {
-          ngx.log(ngx.WARN, `success: fetchEmbyNotificationsAdmin: ${JSON.stringify(body)}`);
-        } else {
-          ngx.log(ngx.ERR, `error: fetchEmbyNotificationsAdmin: ${res.status} ${res.statusText}`);
-        }
-      });
-    } catch (error) {
-      ngx.log(ngx.ERR, `error: fetchEmbyNotificationsAdmin: ${error}`);
-    }
+const args = {
+  filePathKey: "filePath",
+  notLocalKey: "notLocal",
 }
 
-async function fetchEmbySessionsMessage(Id, Header, Text, TimeoutMs) {
-  const body = {
-    Header: Header,
-    Text: Text,
-    TimeoutMs: TimeoutMs,
+function proxyUri(uri) {
+  return `/proxy${uri}`;
+}
+
+function appendUrlArg(u, k, v) {
+  if (u.includes(k)) {
+    return u;
   }
-  try {
-    ngx.fetch(`${config.embyHost}/Sessions/${Id}/Message?api_key=${config.embyApiKey}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json;charset=utf-8"
-      },
-      body: JSON.stringify(body),
-    }).then(res => {
-      if (res.ok) {
-        ngx.log(ngx.WARN, `success: fetchEmbySessionsMessage: ${JSON.stringify(body)}`);
-      } else {
-        ngx.log(ngx.ERR, `error: fetchEmbySessionsMessage: ${res.status} ${res.statusText}`);
+  return u + (u.includes("?") ? "&" : "?") + `${k}=${v}`;
+}
+
+function addDefaultApiKey(r, u) {
+  let url = u;
+  const itemInfo = getItemInfo(r);
+  if (!url.includes("api_key") && !url.includes("X-Emby-Token")) {
+    url = appendUrlArg(url, "api_key", itemInfo.api_key);
+  }
+  return url;
+}
+
+function generateUrl(r, host, uri) {
+  let url = host + uri;
+  let isFirst = true;
+  for (const key in r.args) {
+    url += isFirst ? "?" : "&";
+    url += `${key}=${r.args[key]}`;
+    isFirst = false;
+  }
+  return url;
+}
+
+function getCurrentRequestUrl(r) {
+  const host = r.headersIn["Host"];
+  return addDefaultApiKey(r, generateUrl(r, "http://" + host, r.uri));
+}
+
+function isDisableRedirect(str, isAlistRes, notLocal) {
+  let arr2D;
+  let flag;
+  if (!!isAlistRes) {
+    // this var isAlistRes = true
+    arr2D = config.disableRedirectRule.filter(rule => !!rule[2]);
+  } else {
+    // not xxxMountPath first
+    config.embyMountPath.some(path => {
+      if (!!path && !str.startsWith(path) && !notLocal) {
+        ngx.log(ngx.WARN, `hit isDisableRedirect, not xxxMountPath first: ${path}`);
+        return true;
       }
     });
-  } catch (error) {
-    ngx.log(ngx.ERR, `error: fetchEmbySessionsMessage: ${error}`);
+    arr2D = config.disableRedirectRule.filter(rule => !rule[2]);
   }
+  return arr2D.some(rule => {
+    flag = strMatches(rule[0], str, rule[1]);
+    if (flag) {
+      ngx.log(ngx.WARN, `hit isDisableRedirect: ${JSON.stringify(rule)}`);
+    }
+    return flag;
+  });
 }
 
-async function fetchEmbySessions(DeviceId, Id, IsPlaying, ControllableByUserId) {
-  const body = {
-    ControllableByUserId: ControllableByUserId,
-    DeviceId: DeviceId,
-    Id: Id,
-    IsPlaying: IsPlaying
+function strMapping(type, sourceValue, searchValue, replaceValue) {
+  let str = sourceValue;
+  if (type == 1) {
+    str = searchValue + str;
+    ngx.log(ngx.WARN, `strMapping append: ${searchValue}`);
   }
-  try {
-    return ngx.fetch(`${config.embyHost}/Sessions?api_key=${config.embyApiKey}`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json;charset=utf-8"
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (error) {
-    ngx.log(ngx.ERR, `error: fetchEmbySessions: ${error}`);
+  if (type == 2) {
+    str += searchValue;
+    ngx.log(ngx.WARN, `strMapping unshift: ${searchValue}`);
   }
+  if (type == 0) {
+    str = str.replace(searchValue, replaceValue);
+    ngx.log(ngx.WARN, `strMapping replace: ${searchValue} => ${replaceValue}`);
+  }
+  return str;
 }
 
-export default { 
-    fetchEmbyNotificationsAdmin,
-    fetchEmbySessionsMessage,
-    fetchEmbySessions,
+function strMatches(type, searchValue, matcher) {
+  if (0 == type && searchValue.startsWith(matcher)) {
+    return true;
+  }
+  if (1 == type && searchValue.endsWith(matcher)) {
+    return true;
+  }
+  if (2 == type && searchValue.includes(matcher)) {
+    return true;
+  }
+  if (3 == type && !!searchValue.match(matcher)) {
+    return true;
+  }
+  return false;
+}
+
+function checkIsStrmByPath(filePath) {
+  if (!!filePath) {
+    // strm: filePath1-itemPath like: /xxx/xxx.strm
+    return filePath.toLowerCase().endsWith(".strm");
+  }
+  return false;
+}
+
+function checkNotLocal(protocol, mediaStreamsLength) {
+  // MediaSourceInfo{ Protocol }, string ($enum)(File, Http, Rtmp, Rtsp, Udp, Rtp, Ftp, Mms)
+  // live stream "IsInfiniteStream": true
+  if (!!protocol) {
+    if (protocol != "File") {
+      return true;
+    }
+    return mediaStreamsLength == 0;
+  }
+  return false;
+}
+
+function getItemInfo(r) {
+  const embyHost = config.embyHost;
+  const embyApiKey = config.embyApiKey;
+  const regex = /[A-Za-z0-9]+/g;
+  const itemId = r.uri.replace("emby", "").replace("Sync", "").replace(/-/g, "").match(regex)[1];
+  const mediaSourceId = r.args.MediaSourceId
+    ? r.args.MediaSourceId
+    : r.args.mediaSourceId;
+  const Etag = r.args.Tag;
+  let api_key = r.args["X-Emby-Token"]
+    ? r.args["X-Emby-Token"]
+    : r.args.api_key;
+  api_key = api_key ? api_key : embyApiKey;
+  let itemInfoUri = "";
+  if (r.uri.includes("JobItems")) {
+	  itemInfoUri = `${embyHost}/Sync/JobItems?api_key=${api_key}`;
+  } else {
+    if (mediaSourceId) {
+      itemInfoUri = `${embyHost}/Items?Ids=${mediaSourceId}&Fields=Path,MediaSources&Limit=1&api_key=${api_key}`;
+    } else {
+      itemInfoUri = `${embyHost}/Items?Ids=${itemId}&Fields=Path,MediaSources&Limit=1&api_key=${api_key}`;
+    }
+  }
+  return { itemInfoUri, itemId , Etag, mediaSourceId, api_key };
+}
+
+export default {
+  args,
+  appendUrlArg,
+  addDefaultApiKey,
+  proxyUri,
+  getItemInfo,
+  generateUrl,
+  isDisableRedirect,
+  strMapping,
+  strMatches,
+  checkIsStrmByPath,
+  checkNotLocal,
+  getCurrentRequestUrl
 };
